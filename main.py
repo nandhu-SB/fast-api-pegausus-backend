@@ -32,7 +32,7 @@ def clean_value(val):
 @app.get("/stock/{ticker}")
 async def get_stock_data(
     ticker: str,
-    history_period: str = Query("7d", description="History period, e.g., 7d, 1mo, 1y"),
+    history_period: str = Query("1y", description="History period, e.g., 7d, 1mo, 1y"),
     include_news: bool = Query(True, description="Include news articles"),
 ):
     try:
