@@ -1,10 +1,9 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 import yfinance as yf
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import Query  
-from datetime import datetime, timedelta
 import numpy as np
 import pandas as pd
+import logging
 
 app = FastAPI()
 
@@ -17,132 +16,183 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Helper function to handle NaN, None, inf
+# Logger setup
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Set pandas option to suppress future warnings
+pd.set_option("future.no_silent_downcasting", True)
+
+# Helper function to clean values
 def clean_value(val):
-    if val is None:
-        return "N/A"
-    if isinstance(val, float):
-        if np.isnan(val) or np.isinf(val):
-            return "N/A"
-        return round(val, 2)
-    return val
+    if val is None or (isinstance(val, float) and (np.isnan(val) or np.isinf(val))):
+        return None
+    return round(val, 2) if isinstance(val, float) else val
 
 @app.get("/stock/{ticker}")
 async def get_stock_data(
     ticker: str,
     history_period: str = Query("7d", description="History period, e.g., 7d, 1mo, 1y"),
     include_news: bool = Query(True, description="Include news articles"),
-
 ):
     try:
         stock = yf.Ticker(ticker)
-        info = stock.info
-        news = stock.get_news()
-        holders=stock.major_holders
+        if not stock.info:
+            return {"error": f"Stock {ticker} not found."}
 
-        # 1-Year History
-        # end_date = datetime.today()
-        # start_date = end_date - timedelta(days=365)
-        # history_data = stock.history(start=start_date.strftime("%Y-%m-%d"), end=end_date.strftime("%Y-%m-%d"))
-        history_data=stock.history(period=history_period)
+        info = stock.info or {}
+        news = stock.get_news() or []
+        holders = stock.major_holders if not stock.major_holders.empty else "N/A"
+
+        # Fetch history data
+        history_data = stock.history(period=history_period)
         if history_data.empty:
-            return {"error": "No price history available for the given ticker."}
+            return {"error": "No price history available."}
         else:
-            data = history_data.tail(1)
+            latest_data = history_data.iloc[-1]
 
         # QoQ Financials
         qoq_financials = {}
         try:
-            quarterly = stock.quarterly_financials.fillna(0)
+            quarterly = stock.quarterly_financials
             if not quarterly.empty:
-                qoq_financials = quarterly.iloc[::-1].T.to_dict()
-                # Choose specific features you want:
-                selected_features = ["Total Revenue", "Gross Profit", "Operating Income", "Net Income"]
-                filtered_quarterly={}
-                for feature in selected_features:
-                    if feature in qoq_financials:
-                        filtered_quarterly[feature]=qoq_financials[feature]
-                qoq_financials=filtered_quarterly
-                
-
-        except Exception as e:
+                quarterly = quarterly.infer_objects(copy=False).fillna(0)
+                qoq_financials = {k: clean_value(v) for k, v in quarterly.iloc[::-1].T.to_dict().items()}
+        except Exception:
             qoq_financials = {"error": "Quarterly financials not available"}
 
         # YoY Financials
         yoy_financials = {}
         try:
-            yearly = stock.financials.fillna(0)
+            yearly = stock.financials
             if not yearly.empty:
-                # Transpose & reverse order (most recent first)
-                yearly_dict = yearly.iloc[::-1].T.to_dict()
-
-                # Choose specific features you want:
-                selected_features = ["Total Revenue", "Gross Profit", "Operating Income", "Net Income"]
-
-                # Filter the features
-                filtered_financials = {}
-                for feature in selected_features:
-                    if feature in yearly_dict:
-                        filtered_financials[feature] = yearly_dict[feature]
-
-                yoy_financials = filtered_financials
-
-        except Exception as e:
+                yearly = yearly.infer_objects(copy=False).fillna(0)
+                yoy_financials = {k: clean_value(v) for k, v in yearly.iloc[::-1].T.to_dict().items()}
+        except Exception:
             yoy_financials = {"error": "Yearly financials not available"}
 
 
-        # News Formatting
-        formatted_news = []
-        if include_news:
-            if news:
-                for article in news:
-                    content = article.get('content', {})
-                    title = content.get('title', '').strip()
-                    link = content.get('clickThroughUrl', {}).get('url', '').strip()
-                    if not title or not link:
-                        continue
-                    formatted_news.append({
-                        "title": title,
-                        "summary": content.get('summary', 'No Summary'),
-                        "link": link,
-                        "publisher": content.get('provider', {}).get('displayName', 'Unknown'),
-                        "time": content.get('pubDate', 'N/A'),
-                    })
+        # QoQ balance_sheet
+        qoq_balance_sheet = {}
+        try:
+            quarterly = stock.quarterly_balance_sheet
+            if not quarterly.empty:
+                quarterly = quarterly.infer_objects(copy=False).fillna(0)
+                qoq_balance_sheet = {k: clean_value(v) for k, v in quarterly.iloc[::-1].T.to_dict().items()}
+        except Exception:
+            qoq_balance_sheet = {"error": "Quarterly balance_sheet not available"}
 
-        # Price History Formatting
-        price_history = []
-        if not history_data.empty:
-            for index, row in history_data.iterrows():
-                close_price = row["Close"]
-                open_price=row["Open"]
-                high_price=row["High"]
-                low_price=row["Low"]
-             
-                # if pd.isna(close_price):
-                #     continue
+        # YoY balance_sheet
+        yoy_balance_sheet = {}
+        try:
+            yearly = stock.balance_sheet
+            if not yearly.empty:
+                yearly = yearly.infer_objects(copy=False).fillna(0)
+                yoy_balance_sheet = {k: clean_value(v) for k, v in yearly.iloc[::-1].T.to_dict().items()}
+        except Exception:
+            yoy_balance_sheet = {"error": "Yearly balance_sheet not available"}
 
-                price_history.append({
-                    "date": index.strftime("%Y-%m-%d"),
-                    "close": round(float(close_price), 2),
-                    "open":round(float(open_price)),
-                    "high":round(float(high_price)),
-                    "low_price":round(float(low_price))
-                    
-                })
 
-        # Final Response
+
+
+
+
+        # QoQ cashflow
+        # qoq_cashflow = {}
+        # try:
+        #     quarterly = stock.quarterly_cashflow
+        #     if not quarterly.empty:
+        #         quarterly = quarterly.infer_objects(copy=False).fillna(0)
+        #         qoq_cashflow = {k: clean_value(v) for k, v in quarterly.iloc[::-1].T.to_dict().items()}
+        # except Exception:
+        #     qoq_cashflow = {"error": "Quarterly cashflow not available"}
+
+        # YoY cashflow
+        yoy_cashflow = {}
+        try:
+            yearly = stock.cashflow
+            if not yearly.empty:
+                yearly = yearly.infer_objects(copy=False).fillna(0)
+                yoy_cashflow = {k: clean_value(v) for k, v in yearly.iloc[::-1].T.to_dict().items()}
+        except Exception:
+            yoy_cashflow = {"error": "Yearly cashflow not available"}
+
+
+
+
+
+        # Sustainability Score
+        sustainability_score = {}
+        try:
+            sustainability = stock.sustainability
+            if not sustainability.empty:
+                sustainability = sustainability.infer_objects(copy=False).fillna(0)
+                sustainability_score = {
+                    k: clean_value(v["esgScores"]) if isinstance(v, dict) and "esgScores" in v else clean_value(v)
+                    for k, v in sustainability.iloc[::-1].T.to_dict().items()
+                }
+        except Exception:
+            sustainability_score = {"error": "Sustainability Score is not available"}
+
+        # Format news
+        formatted_news = [
+            {
+                "title": a.get("content", {}).get("title", "No Title"),
+                "summary": a.get("content", {}).get("summary", "No Summary"),
+                "link": a.get("content", {}).get("clickThroughUrl", {}).get("url", ""),
+                "publisher": a.get("content", {}).get("provider", {}).get("displayName", "Unknown"),
+                "time": a.get("content", {}).get("pubDate", "N/A"),
+            }
+            for a in news if a.get("content")
+        ]
+
+        # Format price history
+        
+        price_history = [
+            {
+                "date": index.strftime("%Y-%m-%d"),
+                "close": clean_value(row["Close"]),
+                "open": clean_value(row["Open"]),
+                "high": clean_value(row["High"]),
+                "low": clean_value(row["Low"]),
+            }
+            for index, row in history_data.iterrows()
+        ]
+
+        # Process analyst recommendations safely
+        recommendations = []
+        try:
+            rec_data = stock.recommendations
+            # logger.info(f"Raw Recommendations Data for {ticker}: {rec_data}")
+
+            if rec_data is not None and not rec_data.empty:
+                recommendations = [
+                    {
+                        "period": row.Index.strftime("%Y-%m") if hasattr(row.Index, "strftime") else str(row.Index),
+                        "strongBuy": int(row.strongBuy) if hasattr(row, "strongBuy") and not np.isnan(row.strongBuy) else 0,
+                        "buy": int(row.buy) if hasattr(row, "buy") and not np.isnan(row.buy) else 0,
+                        "hold": int(row.hold) if hasattr(row, "hold") and not np.isnan(row.hold) else 0,
+                        "sell": int(row.sell) if hasattr(row, "sell") and not np.isnan(row.sell) else 0,
+                        "strongSell": int(row.strongSell) if hasattr(row, "strongSell") and not np.isnan(row.strongSell) else 0,
+                    }
+                    for row in rec_data.tail(4).itertuples()
+                ]
+            else:
+                logger.warning(f"No recommendations data available for {ticker}")
+        except Exception as e:
+            logger.error(f"Error processing recommendations for {ticker}: {str(e)}")
+            recommendations = {"error": "Recommendations data not available"}
+
         return {
-            "symbol": info.get('longName',"N/A"),
-            "sector":info.get('sector',"N/A"),
-            "industry":info.get('industry',"N/A"),
-            "business_summary": info.get("longBusinessSummary", "N/A"),
-            "price": clean_value(data["Close"].iloc[-1]) if not data.empty else "N/A",
-            "high": clean_value(data["High"].iloc[-1]) if not data.empty else "N/A",
-            "low": clean_value(data["Low"].iloc[-1]) if not data.empty else "N/A",
-            "open": clean_value(data["Open"].iloc[-1]) if not data.empty else "N/A",
-            "volume": int(data["Volume"].iloc[-1]) if not data.empty else "N/A",
+            "symbol": info.get("longName", "N/A"),
             "sector": info.get("sector", "N/A"),
             "industry": info.get("industry", "N/A"),
+            "business_summary": info.get("longBusinessSummary", "N/A"),
+            "price": clean_value(latest_data["Close"]),
+            "high": clean_value(latest_data["High"]),
+            "low": clean_value(latest_data["Low"]),
+            "open": clean_value(latest_data["Open"]),
+            "volume": int(latest_data["Volume"]) if not np.isnan(latest_data["Volume"]) else "N/A",
             "market_cap": clean_value(info.get("marketCap")),
             "pe_ratio": clean_value(info.get("trailingPE")),
             "dividend_yield": clean_value(info.get("dividendYield")),
@@ -156,8 +206,15 @@ async def get_stock_data(
             "history": price_history,
             "quarterly_financials": qoq_financials,
             "yearly_financials": yoy_financials,
-            "holders":holders
+            "quarterly_balance_sheet": qoq_balance_sheet,
+            "yearly_balance_sheet": yoy_balance_sheet,
+            # "quarterly_cashflow": qoq_cashflow,
+            "yearly_cashflow": yoy_cashflow,
+            "holders": holders,
+            "sustainability_score": sustainability_score,
+            "recommendations": recommendations,  # Fixed key name
         }
-
+    
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Error fetching stock data for {ticker}: {str(e)}")
+        return {"error": "An error occurred while fetching stock data."}
