@@ -37,10 +37,15 @@ async def get_stock_data(
 ):
     try:
         stock = yf.Ticker(ticker)
-        if not stock.info:
-            return {"error": f"Stock {ticker} not found."}
+        # if not stock.info:
+        #     return {"error": f"Stock {ticker} not found."}
 
-        info = stock.info or {}
+        # info = stock.info or {}
+        try:
+            info = stock.info
+        except Exception as e:
+            info={}
+
         news = stock.get_news() or []
         holders = stock.major_holders if not stock.major_holders.empty else "N/A"
 
@@ -208,7 +213,6 @@ async def get_stock_data(
             "yearly_financials": yoy_financials,
             "quarterly_balance_sheet": qoq_balance_sheet,
             "yearly_balance_sheet": yoy_balance_sheet,
-            # "quarterly_cashflow": qoq_cashflow,
             "yearly_cashflow": yoy_cashflow,
             "holders": holders,
             "sustainability_score": sustainability_score,
