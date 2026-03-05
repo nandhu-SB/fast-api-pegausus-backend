@@ -161,6 +161,19 @@ def format_price_history(history_data):
     ]
 
 
+def safe_latest(latest_data, key):
+    """Safely extract a value from the latest price data row."""
+    if latest_data is None:
+        return None
+    try:
+        val = latest_data[key]
+        if isinstance(val, float) and np.isnan(val):
+            return None
+        return clean_value(val)
+    except Exception:
+        return None
+
+
 # ─── Main endpoint ───────────────────────────────────────────────────────────
 
 @app.get("/stock/{ticker}")
@@ -172,20 +185,21 @@ async def get_stock_data(
     try:
         stock = yf.Ticker(ticker)
 
-        # ── Info ──
+        # ── Info (non-fatal) ──
         info = get_info_safe(stock)
 
-        # ── Price history (critical — fail if missing) ──
+        # ── Price history (non-fatal — other sections still returned) ──
+        latest_data = None
+        price_history = []
         try:
             history_data = stock.history(period=period)
+            if not history_data.empty:
+                latest_data = history_data.iloc[-1]
+                price_history = format_price_history(history_data)
+            else:
+                logger.warning(f"No price history returned for {ticker}")
         except Exception as e:
             logger.error(f"Failed to fetch history for {ticker}: {e}")
-            return {"error": f"Failed to fetch price history for {ticker}: {str(e)}"}
-
-        if history_data.empty:
-            return {"error": f"No price history available for {ticker}. Check the ticker symbol."}
-
-        latest_data = history_data.iloc[-1]
 
         # ── Financials (all non-fatal) ──
         qoq_financials = get_financials_safe(stock, "quarterly_financials", "Quarterly financials")
@@ -199,18 +213,26 @@ async def get_stock_data(
         sustainability_score = get_sustainability_safe(stock)
         recommendations = get_recommendations_safe(stock, ticker)
         news = get_news_safe(stock) if include_news else []
-        price_history = format_price_history(history_data)
+
+        # ── Volume ──
+        volume = None
+        if latest_data is not None:
+            try:
+                vol = latest_data["Volume"]
+                volume = int(vol) if not np.isnan(vol) else None
+            except Exception:
+                volume = None
 
         return {
             "symbol": info.get("longName", "N/A"),
             "sector": info.get("sector", "N/A"),
             "industry": info.get("industry", "N/A"),
             "business_summary": info.get("longBusinessSummary", "N/A"),
-            "price": clean_value(latest_data["Close"]),
-            "high": clean_value(latest_data["High"]),
-            "low": clean_value(latest_data["Low"]),
-            "open": clean_value(latest_data["Open"]),
-            "volume": int(latest_data["Volume"]) if not np.isnan(latest_data["Volume"]) else None,
+            "price": safe_latest(latest_data, "Close"),
+            "high": safe_latest(latest_data, "High"),
+            "low": safe_latest(latest_data, "Low"),
+            "open": safe_latest(latest_data, "Open"),
+            "volume": volume,
             "market_cap": clean_value(info.get("marketCap")),
             "pe_ratio": clean_value(info.get("trailingPE")),
             "dividend_yield": clean_value(info.get("dividendYield")),
