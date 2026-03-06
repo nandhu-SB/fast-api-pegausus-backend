@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 import pandas as pd
 import logging
+import time
 
 app = FastAPI()
 
@@ -23,11 +24,44 @@ logger = logging.getLogger(__name__)
 # Set pandas option to suppress future warnings
 pd.set_option("future.no_silent_downcasting", True)
 
+
+# ─── Cache ───────────────────────────────────────────────────────────────────
+
+CACHE = {}
+CACHE_TTL = 3600  # 1 hour in seconds
+
+
+def get_cache_key(ticker: str, period: str, include_news: bool) -> str:
+    return f"{ticker}:{period}:{include_news}"
+
+
+def get_cached(key: str):
+    if key in CACHE:
+        data, timestamp = CACHE[key]
+        if time.time() - timestamp < CACHE_TTL:
+            logger.info(f"Cache HIT for {key}")
+            return data
+        else:
+            del CACHE[key]
+            logger.info(f"Cache EXPIRED for {key}")
+    return None
+
+
+def set_cache(key: str, data: dict):
+    CACHE[key] = (data, time.time())
+    logger.info(f"Cache SET for {key}")
+
+
+# ─── Helper ──────────────────────────────────────────────────────────────────
+
 # Helper function to clean values
 def clean_value(val):
     if val is None or (isinstance(val, float) and (np.isnan(val) or np.isinf(val))):
         return None
     return round(val, 2) if isinstance(val, float) else val
+
+
+# ─── Main endpoint ───────────────────────────────────────────────────────────
 
 @app.get("/stock/{ticker}")
 async def get_stock_data(
@@ -35,6 +69,12 @@ async def get_stock_data(
     history_period: str = Query("1y", description="History period, e.g., 7d, 1mo, 1y"),
     include_news: bool = Query(True, description="Include news articles"),
 ):
+    # ── Check cache first ──
+    cache_key = get_cache_key(ticker, history_period, include_news)
+    cached = get_cached(cache_key)
+    if cached:
+        return cached
+
     try:
         stock = yf.Ticker(ticker)
         # if not stock.info:
@@ -98,20 +138,6 @@ async def get_stock_data(
             yoy_balance_sheet = {"error": "Yearly balance_sheet not available"}
 
 
-
-
-
-
-        # QoQ cashflow
-        # qoq_cashflow = {}
-        # try:
-        #     quarterly = stock.quarterly_cashflow
-        #     if not quarterly.empty:
-        #         quarterly = quarterly.infer_objects(copy=False).fillna(0)
-        #         qoq_cashflow = {k: clean_value(v) for k, v in quarterly.iloc[::-1].T.to_dict().items()}
-        # except Exception:
-        #     qoq_cashflow = {"error": "Quarterly cashflow not available"}
-
         # YoY cashflow
         yoy_cashflow = {}
         try:
@@ -121,9 +147,6 @@ async def get_stock_data(
                 yoy_cashflow = {k: clean_value(v) for k, v in yearly.iloc[::-1].T.to_dict().items()}
         except Exception:
             yoy_cashflow = {"error": "Yearly cashflow not available"}
-
-
-
 
 
         # Sustainability Score
@@ -168,7 +191,6 @@ async def get_stock_data(
         recommendations = []
         try:
             rec_data = stock.recommendations
-            # logger.info(f"Raw Recommendations Data for {ticker}: {rec_data}")
 
             if rec_data is not None and not rec_data.empty:
                 recommendations = [
@@ -188,7 +210,7 @@ async def get_stock_data(
             logger.error(f"Error processing recommendations for {ticker}: {str(e)}")
             recommendations = {"error": "Recommendations data not available"}
 
-        return {
+        response = {
             "symbol": info.get("longName", "N/A"),
             "sector": info.get("sector", "N/A"),
             "industry": info.get("industry", "N/A"),
@@ -216,9 +238,34 @@ async def get_stock_data(
             "yearly_cashflow": yoy_cashflow,
             "holders": holders,
             "sustainability_score": sustainability_score,
-            "recommendations": recommendations,  # Fixed key name
+            "recommendations": recommendations,
         }
+
+        # ── Cache the successful response ──
+        set_cache(cache_key, response)
+
+        return response
     
     except Exception as e:
         logger.error(f"Error fetching stock data for {ticker}: {str(e)}")
         return {"error": "An error occurred while fetching stock data."}
+
+
+# ─── Cache management endpoints ──────────────────────────────────────────────
+
+@app.get("/cache/status")
+async def cache_status():
+    """Check what's currently cached."""
+    now = time.time()
+    entries = []
+    for key, (_, timestamp) in CACHE.items():
+        remaining = max(0, int(CACHE_TTL - (now - timestamp)))
+        entries.append({"key": key, "expires_in_seconds": remaining})
+    return {"cached_entries": len(CACHE), "entries": entries}
+
+
+@app.delete("/cache/clear")
+async def clear_cache():
+    """Manually clear all cached data."""
+    CACHE.clear()
+    return {"message": "Cache cleared"}
